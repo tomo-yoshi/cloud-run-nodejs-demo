@@ -29,8 +29,9 @@ resource "google_cloud_run_service" "service" {
 }
 
 resource "google_cloud_run_service_iam_member" "public" {
-  service  = google_cloud_run_service.service.name
+  count    = var.allow_public_access ? 1 : 0
   location = google_cloud_run_service.service.location
+  service  = google_cloud_run_service.service.name
   role     = "roles/run.invoker"
   member   = "allUsers"
 } 
