@@ -1,0 +1,70 @@
+name: Preview Deployment
+
+on:
+  pull_request:
+    branches:
+      - develop
+    types: [opened, synchronize, reopened, closed]
+
+env:
+  PROJECT_ID: ftc-performance-optimization
+  REGION: us-west1
+
+jobs:
+  deploy:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup Google Cloud
+        uses: google-github-actions/setup-gcloud@v0
+        with:
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker
+
+      - name: Build and Push Docker image
+        run: |
+          docker build -t gcr.io/${{ env.PROJECT_ID }}/nodejs-server:pr-${{ github.event.number }} .
+          docker push gcr.io/${{ env.PROJECT_ID }}/nodejs-server:pr-${{ github.event.number }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+
+      - name: Terraform Init
+        working-directory: terraform/environments/preview
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: terraform/environments/preview
+        run: |
+          terraform apply -auto-approve \
+            -var="project_id=${{ env.PROJECT_ID }}" \
+            -var="region=${{ env.REGION }}" \
+            -var="image_url=gcr.io/${{ env.PROJECT_ID }}/nodejs-server:pr-${{ github.event.number }}" \
+            -var="pr_number=${{ github.event.number }}"
+
+  cleanup:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+
+      - name: Terraform Init
+        working-directory: terraform/environments/preview
+        run: terraform init
+
+      - name: Terraform Destroy
+        working-directory: terraform/environments/preview
+        run: |
+          terraform destroy -auto-approve \
+            -var="project_id=${{ env.PROJECT_ID }}" \
+            -var="region=${{ env.REGION }}" \
+            -var="image_url=gcr.io/${{ env.PROJECT_ID }}/nodejs-server:pr-${{ github.event.number }}" \
+            -var="pr_number=${{ github.event.number }}" 
