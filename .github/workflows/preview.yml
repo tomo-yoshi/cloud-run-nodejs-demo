@@ -1,110 +1,112 @@
-name: Preview Deployment
+name: Deploy PR to Cloud Run Preview
 
 on:
   pull_request:
-    branches:
-      - develop
     types: [opened, synchronize, reopened, closed]
 
-env:
-  PROJECT_ID: ftc-performance-optimization
-  REGION: us-west1
-
 jobs:
-  deploy:
-    if: github.event.action != 'closed'
+  deploy-preview:
+    if: |
+      github.event.action != 'closed' &&
+      github.event.pull_request.number == github.event.number &&
+      !(github.event.pull_request.head.ref == 'develop' && github.event.pull_request.base.ref == 'main')
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      pull-requests: 'write'
 
-      - name: Setup Google Cloud
-        uses: google-github-actions/setup-gcloud@v0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Google Auth
+        id: auth
+        uses: 'google-github-actions/auth@v2'
         with:
-          service_account_key: ${{ secrets.GCP_SA_KEY }}
-          project_id: ${{ env.PROJECT_ID }}
-          export_default_credentials: true
+          credentials_json: '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}'
+
+      - name: Set up Cloud SDK
+        uses: 'google-github-actions/setup-gcloud@v2'
 
       - name: Configure Docker
-        run: gcloud auth configure-docker
-
-      - name: Build and Push Docker image
         run: |
-          docker build -t gcr.io/${{ env.PROJECT_ID }}/nodejs-server:pr-${{ github.event.number }} .
-          docker push gcr.io/${{ env.PROJECT_ID }}/nodejs-server:pr-${{ github.event.number }}
+          gcloud auth configure-docker us-west1-docker.pkg.dev
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v1
-
-      - name: Terraform Init
-        working-directory: terraform/environments/preview
+      - name: Build and Push Image
         run: |
-          terraform init \
-            -backend-config="project=${{ env.PROJECT_ID }}" \
-            -backend-config="bucket=${{ env.PROJECT_ID }}-terraform-state"
+          docker build -t us-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }} .
+          docker push us-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }}
 
-      - name: Terraform Apply
-        working-directory: terraform/environments/preview
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
-        id: terraform-apply
+      - name: Extract PR info
+        id: pr_info
         run: |
-          terraform apply -auto-approve \
-            -var="project_id=${{ env.PROJECT_ID }}" \
-            -var="region=${{ env.REGION }}" \
-            -var="image_url=gcr.io/${{ env.PROJECT_ID }}/nodejs-server:pr-${{ github.event.number }}" \
-            -var="pr_number=${{ github.event.number }}"
-          
-          # Extract and save the URL
-          echo "preview_url=$(terraform output -raw service_url)" >> $GITHUB_OUTPUT
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          PR_TITLE=$(echo "${{ github.event.pull_request.title }}" | tr -cd '[:alnum:]-' | tr '[:upper:]' '[:lower:]' | cut -c1-20)
+          SERVICE_NAME="pr-${PR_NUMBER}-${PR_TITLE}"
+          echo "service_name=${SERVICE_NAME}" >> $GITHUB_OUTPUT
 
-      - name: Comment PR
-        uses: actions/github-script@v6
+      - name: Deploy to Cloud Run
+        id: deploy
+        run: |
+          SERVICE_URL=$(gcloud run deploy ${{ steps.pr_info.outputs.service_name }} \
+            --image us-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }} \
+            --platform managed \
+            --region us-west1 \
+            --allow-unauthenticated \
+            --format="get(status.url)")
+          echo "service_url=${SERVICE_URL}" >> $GITHUB_OUTPUT
+
+      - name: Post comment with preview URL
+        uses: mshick/add-pr-comment@v2
+        if: always()
         with:
-          script: |
-            const previewUrl = '${{ steps.terraform-apply.outputs.preview_url }}';
-            const message = `🚀 Preview environment is ready!\n\nPreview URL: ${previewUrl}`;
+          message: |
+            ## 🚀 Preview Deployment Status
             
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.name,
-              body: message
-            });
+            ${{ job.status == 'success' && format('### ✅ Deployment Successful
+            Preview your changes at: {0}
+            ', steps.deploy.outputs.service_url) || '### ❌ Deployment Failed
+            The preview deployment encountered an error. Please check the workflow logs for details.
+            ' }}
+          message-id: preview-deploy-${{ github.event.pull_request.number }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          allow-repeats: false
+          refresh-message-position: true
 
-  cleanup:
-    if: github.event.action == 'closed'
+  cleanup-preview:
+    if: ${{ github.event.action == 'closed' && github.event.pull_request.number == github.event.number }}
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Setup Google Cloud
-        uses: google-github-actions/setup-gcloud@v0
+      - name: Authenticate with Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
         with:
-          service_account_key: ${{ secrets.GCP_SA_KEY }}
-          project_id: ${{ env.PROJECT_ID }}
-          export_default_credentials: true
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          token_format: 'access_token'
+          create_credentials_file: true
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          access_token_lifetime: '3600s'
+          export_environment_variables: true
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v1
-
-      - name: Terraform Init
-        working-directory: terraform/environments/preview
+      - name: Extract PR number and name
+        id: pr_info
         run: |
-          terraform init \
-            -backend-config="project=${{ env.PROJECT_ID }}" \
-            -backend-config="bucket=${{ env.PROJECT_ID }}-terraform-state"
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          PR_TITLE=$(echo "${{ github.event.pull_request.title }}" | tr -cd '[:alnum:]-' | tr '[:upper:]' '[:lower:]' | cut -c1-20)
+          SERVICE_NAME="pr-${PR_NUMBER}-${PR_TITLE}"
+          echo "service_name=${SERVICE_NAME}" >> $GITHUB_OUTPUT
 
-      - name: Terraform Destroy
-        working-directory: terraform/environments/preview
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
+      - name: Delete Cloud Run instance
         run: |
-          terraform destroy -auto-approve \
-            -var="project_id=${{ env.PROJECT_ID }}" \
-            -var="region=${{ env.REGION }}" \
-            -var="image_url=gcr.io/${{ env.PROJECT_ID }}/nodejs-server:pr-${{ github.event.number }}" \
-            -var="pr_number=${{ github.event.number }}" 
+          if gcloud run services describe ${{ steps.pr_info.outputs.service_name }} --region us-west1 --quiet >/dev/null 2>&1; then
+            gcloud run services delete ${{ steps.pr_info.outputs.service_name }} --region us-west1 --quiet
+          else
+            echo "Service ${{ steps.pr_info.outputs.service_name }} does not exist, skipping deletion"
+          fi
 
-permissions:
-  pull-requests: write
-  contents: read 
+      - name: Post comment about deletion
+        uses: mshick/add-pr-comment@v2
+        with:
+          message: "🗑️ Preview environment **${{ steps.pr_info.outputs.service_name }}** has been deleted."
