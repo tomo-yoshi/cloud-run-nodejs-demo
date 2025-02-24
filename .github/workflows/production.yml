@@ -29,7 +29,29 @@ jobs:
           credentials_json: '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}'
 
       - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
+        uses: 'google-github-actions/setup-gcloud@v2'
+
+      - name: Configure Docker
+        run: |
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Check and Create Docker Repository
+        run: |
+          REPO_PATH="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo"
+          if ! gcloud artifacts repositories list --location=${{ env.REGION }} | grep -q "docker-repo"; then
+            echo "Creating Docker repository..."
+            gcloud artifacts repositories create docker-repo \
+              --repository-format=docker \
+              --location=${{ env.REGION }} \
+              --description="Docker repository for production deployment"
+          else
+            echo "Docker repository already exists, skipping creation"
+          fi
+
+      - name: Build and Push Image
+        run: |
+          docker build -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/production-app:${{ github.sha }} .
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/production-app:${{ github.sha }}
 
       - name: Check if Cloud Run service exists
         id: check-service
@@ -40,20 +62,11 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build and Push Container
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          install_components: beta
-
-      - name: Build and Push Container
-        run: |
-          gcloud builds submit --tag gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}
-
       - name: Create and Deploy New Service
         if: steps.check-service.outputs.exists == 'false'
         run: |
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }} \
+            --image ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/production-app:${{ github.sha }} \
             --region ${{ env.REGION }} \
             --platform managed \
             --allow-unauthenticated
@@ -62,6 +75,6 @@ jobs:
         if: steps.check-service.outputs.exists == 'true'
         run: |
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }} \
+            --image ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/production-app:${{ github.sha }} \
             --region ${{ env.REGION }} \
             --platform managed
