@@ -1,98 +1,128 @@
 # Cloud Run Node.js Demo
 
-This is a simple Node.js server that is deployed to Google Cloud Run.
+This repository demonstrates a complete CI/CD setup for deploying a Node.js server to Google Cloud Run with preview, staging, and production environments.
 
-## Prerequisites
+## 🚀 Quick Start
 
-- [Google Cloud SDK](https://cloud.google.com/sdk/docs/install)
-- [Terraform](https://www.terraform.io/downloads)
-- [Node.js](https://nodejs.org/en/download/)
-- [pnpm](https://pnpm.io/installation)
-- [Docker](https://docs.docker.com/get-docker/)
+### Prerequisites
+- Node.js (v18 or later)
+- pnpm (or npm/yarn)
+- Docker
+- Google Cloud CLI
 
-## GCP Setup
+### Local Development
 
-1. **Login and Set Project**
+1. Install dependencies:
 ```bash
-# Login to Google Cloud
-gcloud auth application-default login
-
-# Set your project ID
-gcloud config set project ftc-performance-optimization
+pnpm install
 ```
 
-2. **Enable Required APIs**
+2. Start development server:
 ```bash
-# Enable Cloud Run API
-gcloud services enable run.googleapis.com
-
-# Enable Container Registry API
-gcloud services enable containerregistry.googleapis.com
+pnpm dev
 ```
 
-3. **Setup Service Account for Terraform**
+3. Build for production:
 ```bash
-# Create a service account
-gcloud iam service-accounts create terraform-sa \
-    --description="Service account for Terraform" \
-    --display-name="Terraform SA"
-
-# Grant necessary permissions
-gcloud projects add-iam-policy-binding ftc-performance-optimization \
-    --member="serviceAccount:terraform-sa@ftc-performance-optimization.iam.gserviceaccount.com" \
-    --role="roles/editor"
+pnpm build
 ```
 
-4. **Configure Docker for GCP**
+4. Start production server:
 ```bash
-# Configure Docker to use Google Cloud credentials
-gcloud auth configure-docker
+pnpm start
 ```
 
-## Deployment Steps
+## 🔐 Setting Up GitHub Secrets
 
-1. **Build and Push Docker Image**
+The following secrets need to be configured in your GitHub repository settings:
+
+- GCP_PROJECT_ID # Your Google Cloud Project ID
+- GCP_REGION # e.g., asia-northeast1
+- GCP_SERVICE_ACCOUNT_KEY # JSON key for preview/staging deployments
+- GCP_SERVICE_ACCOUNT # Service account email for production
+- GCP_WORKLOAD_IDENTITY_PROVIDER # Workload Identity Provider for production
+- GCP_CLOUD_RUN_STAGING_INSTANCE_NAME # Name for staging instance
+- GCP_CLOUD_RUN_PRODUCTION_INSTANCE_NAME # Name for production instance   
+
+## 🛠️ Google Cloud Setup Guide
+
+### 1. Create a Google Cloud Project
+
 ```bash
-# Build, tag, and push the image to Container Registry
-pnpm docker:deploy
-```
+# Create new project
+gcloud projects create YOUR_PROJECT_ID
+# Set as current project
+gcloud config set project YOUR_PROJECT_ID
+``` 
+### 2. Enable Required APIs
 
-2. **Deploy Infrastructure**
-
-For staging environment:
 ```bash
-# Initialize Terraform
-pnpm tf:init:staging
+# Enable necessary services
+gcloud services enable \
+cloudbuild.googleapis.com \
+run.googleapis.com \
+containerregistry.googleapis.com \
+artifactregistry.googleapis.com
+``` 
+### 3. Create Service Account for Preview/Staging
 
-# Plan the deployment
-pnpm tf:plan:staging
-
-# Apply the changes
-pnpm tf:apply:staging
-```
-
-For production environment:
 ```bash
-pnpm tf:init:prod
-pnpm tf:plan:prod
-pnpm tf:apply:prod
-```
+# Create service account
+gcloud iam service-accounts create github-actions-deploy \
+--display-name="GitHub Actions Deploy"
+# Generate and download key
+gcloud iam service-accounts keys create key.json \
+--iam-account=github-actions-deploy@YOUR_PROJECT_ID.iam.gserviceaccount.com
+``` 
+### 4. Grant Required Permissions
 
-## Available Scripts
+```bash
+# Grant Cloud Run Admin role
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+--member="serviceAccount:github-actions-deploy@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+--role="roles/run.admin"
+# Grant Storage Admin role (for container registry)
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+--member="serviceAccount:github-actions-deploy@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+--role="roles/storage.admin"
+# Grant Service Account User role
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+--member="serviceAccount:github-actions-deploy@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+--role="roles/iam.serviceAccountUser"
+``` 
+### 5. Setup Workload Identity Federation (for Production)
 
-- `pnpm start`: Start the Node.js server
-- `pnpm dev`: Run the server in development mode
-- `pnpm build`: Build the TypeScript project
-- `pnpm watch`: Watch for TypeScript changes
+```bash
+# Create Workload Identity Pool
+gcloud iam workload-identity-pools create "github-actions-pool" \
+--location="global" \
+--display-name="GitHub Actions Pool"
+# Create Workload Identity Provider
+gcloud iam workload-identity-pools providers create-oidc "github-provider" \
+--location="global" \
+--workload-identity-pool="github-actions-pool" \
+--display-name="GitHub provider" \
+--attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
+--issuer-uri="https://token.actions.githubusercontent.com"
+# Configure IAM policy binding
+gcloud iam service-accounts add-iam-policy-binding "github-actions-deploy@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+--role="roles/iam.workloadIdentityUser" \
+--member="principalSet://iam.googleapis.com/projects/YOUR_PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions-pool/subject/repo:YOUR_GITHUB_USERNAME/YOUR_REPO_NAME"
+``` 
 
-### Docker Commands
-- `pnpm docker:build`: Build the Docker image
-- `pnpm docker:tag`: Tag the image for GCR
-- `pnpm docker:push`: Push the image to GCR
-- `pnpm docker:deploy`: Run all Docker commands in sequence
+## 🌊 Deployment Flow
 
-### Terraform Commands
-- `pnpm tf:init:(staging|prod)`: Initialize Terraform
-- `pnpm tf:plan:(staging|prod)`: Plan Terraform changes
-- `pnpm tf:apply:(staging|prod)`: Apply Terraform changes
-- `pnpm tf:destroy:(staging|prod)`: Destroy infrastructure (use with caution)
+This repository implements a three-environment deployment strategy:
+
+1. **Preview Environment** (`preview.yml`)
+   - Deploys every PR to a unique URL
+   - Automatically cleans up when PR is closed
+   - Excludes develop → main PRs (handled by staging)
+
+2. **Staging Environment** (`staging.yml`)
+   - Deploys when PR is opened from `develop` to `main`
+   - Uses a persistent staging instance
+
+3. **Production Environment** (`production.yml`)
+   - Deploys when code is merged to `main`
+   - Uses Workload Identity Federation for enhanced security
