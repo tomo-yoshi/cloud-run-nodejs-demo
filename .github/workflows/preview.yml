@@ -1,0 +1,125 @@
+name: Deploy PR to Cloud Run Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  deploy-preview:
+    if: |
+      github.event.action != 'closed' &&
+      github.event.pull_request.number == github.event.number &&
+      !(github.event.pull_request.head.ref == 'develop' && github.event.pull_request.base.ref == 'main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      pull-requests: 'write'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Google Auth
+        id: auth
+        uses: 'google-github-actions/auth@v2'
+        with:
+          credentials_json: '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}'
+
+      - name: Set up Cloud SDK
+        uses: 'google-github-actions/setup-gcloud@v2'
+
+      - name: Configure Docker
+        run: |
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev
+
+      - name: Check and Create Docker Repository
+        run: |
+          REPO_PATH="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo"
+          if ! gcloud artifacts repositories list --location=${{ secrets.GCP_REGION }} | grep -q "docker-repo"; then
+            echo "Creating Docker repository..."
+            gcloud artifacts repositories create docker-repo \
+              --repository-format=docker \
+              --location=${{ secrets.GCP_REGION }} \
+              --description="Docker repository for PR previews"
+          else
+            echo "Docker repository already exists, skipping creation"
+          fi
+
+      - name: Build and Push Image
+        run: |
+          docker build -t ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }} .
+          docker push ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }}
+
+      - name: Extract PR info
+        id: pr_info
+        run: |
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          PR_TITLE=$(echo "${{ github.event.pull_request.title }}" | tr -cd '[:alnum:]-' | tr '[:upper:]' '[:lower:]' | cut -c1-20)
+          SERVICE_NAME="pr-${PR_NUMBER}-${PR_TITLE}"
+          echo "service_name=${SERVICE_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        run: |
+          SERVICE_URL=$(gcloud run deploy ${{ steps.pr_info.outputs.service_name }} \
+            --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }} \
+            --platform managed \
+            --region ${{ secrets.GCP_REGION }} \
+            --allow-unauthenticated \
+            --format="get(status.url)")
+          echo "service_url=${SERVICE_URL}" >> $GITHUB_OUTPUT
+
+      - name: Post comment with preview URL
+        uses: mshick/add-pr-comment@v2
+        if: always()
+        with:
+          message: |
+            ## 🚀 Preview Deployment Status
+            
+            ${{ job.status == 'success' && format('### ✅ Deployment Successful
+            Preview your changes at: {0}
+            ', steps.deploy.outputs.service_url) || '### ❌ Deployment Failed
+            The preview deployment encountered an error. Please check the workflow logs for details.
+            ' }}
+          message-id: preview-deploy-${{ github.event.pull_request.number }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          allow-repeats: false
+          refresh-message-position: true
+
+  cleanup-preview:
+    if: ${{ github.event.action == 'closed' && github.event.pull_request.number == github.event.number }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Authenticate with Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          token_format: 'access_token'
+          create_credentials_file: true
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          access_token_lifetime: '3600s'
+          export_environment_variables: true
+
+      - name: Extract PR number and name
+        id: pr_info
+        run: |
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          PR_TITLE=$(echo "${{ github.event.pull_request.title }}" | tr -cd '[:alnum:]-' | tr '[:upper:]' '[:lower:]' | cut -c1-20)
+          SERVICE_NAME="pr-${PR_NUMBER}-${PR_TITLE}"
+          echo "service_name=${SERVICE_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Delete Cloud Run instance
+        run: |
+          if gcloud run services describe ${{ steps.pr_info.outputs.service_name }} --region ${{ secrets.GCP_REGION }} --quiet >/dev/null 2>&1; then
+            gcloud run services delete ${{ steps.pr_info.outputs.service_name }} --region ${{ secrets.GCP_REGION }} --quiet
+          else
+            echo "Service ${{ steps.pr_info.outputs.service_name }} does not exist, skipping deletion"
+          fi
+
+      - name: Post comment about deletion
+        uses: mshick/add-pr-comment@v2
+        with:
+          message: "🗑️ Preview environment **${{ steps.pr_info.outputs.service_name }}** has been deleted."
