@@ -31,12 +31,25 @@ jobs:
 
       - name: Configure Docker
         run: |
-          gcloud auth configure-docker us-west1-docker.pkg.dev
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev
+
+      - name: Check and Create Docker Repository
+        run: |
+          REPO_PATH="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo"
+          if ! gcloud artifacts repositories list --location=${{ secrets.GCP_REGION }} | grep -q "docker-repo"; then
+            echo "Creating Docker repository..."
+            gcloud artifacts repositories create docker-repo \
+              --repository-format=docker \
+              --location=${{ secrets.GCP_REGION }} \
+              --description="Docker repository for PR previews"
+          else
+            echo "Docker repository already exists, skipping creation"
+          fi
 
       - name: Build and Push Image
         run: |
-          docker build -t us-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }} .
-          docker push us-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }}
+          docker build -t ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }} .
+          docker push ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }}
 
       - name: Extract PR info
         id: pr_info
@@ -50,9 +63,9 @@ jobs:
         id: deploy
         run: |
           SERVICE_URL=$(gcloud run deploy ${{ steps.pr_info.outputs.service_name }} \
-            --image us-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }} \
+            --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/preview-app:${{ github.sha }} \
             --platform managed \
-            --region us-west1 \
+            --region ${{ secrets.GCP_REGION }} \
             --allow-unauthenticated \
             --format="get(status.url)")
           echo "service_url=${SERVICE_URL}" >> $GITHUB_OUTPUT
@@ -100,8 +113,8 @@ jobs:
 
       - name: Delete Cloud Run instance
         run: |
-          if gcloud run services describe ${{ steps.pr_info.outputs.service_name }} --region us-west1 --quiet >/dev/null 2>&1; then
-            gcloud run services delete ${{ steps.pr_info.outputs.service_name }} --region us-west1 --quiet
+          if gcloud run services describe ${{ steps.pr_info.outputs.service_name }} --region ${{ secrets.GCP_REGION }} --quiet >/dev/null 2>&1; then
+            gcloud run services delete ${{ steps.pr_info.outputs.service_name }} --region ${{ secrets.GCP_REGION }} --quiet
           else
             echo "Service ${{ steps.pr_info.outputs.service_name }} does not exist, skipping deletion"
           fi
