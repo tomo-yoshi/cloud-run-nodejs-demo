@@ -1,42 +1,101 @@
-name: Staging Deployment
+name: Deploy PR to Cloud Run Staging
 
 on:
   pull_request:
-    branches:
-      - main
     types: [opened, synchronize, reopened]
-
-env:
-  PROJECT_ID: your-project-id
-  REGION: us-central1
-  SERVICE_NAME: nodejs-server-staging
+    branches:
+      - develop
 
 jobs:
-  deploy:
-    if: github.head_ref == 'develop'
+  deploy-staging:
+    if: |
+      github.event.pull_request.head.ref == 'develop' &&
+      github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      pull-requests: 'write'
 
-      - name: Setup Google Cloud
-        uses: google-github-actions/setup-gcloud@v0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Google Auth
+        id: auth
+        uses: 'google-github-actions/auth@v2'
         with:
-          service_account_key: ${{ secrets.GCP_SA_KEY }}
-          project_id: ${{ env.PROJECT_ID }}
+          credentials_json: '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}'
+
+      - name: Set up Cloud SDK
+        uses: 'google-github-actions/setup-gcloud@v2'
 
       - name: Configure Docker
-        run: gcloud auth configure-docker
-
-      - name: Build and Push Docker image
         run: |
-          docker build -t gcr.io/${{ env.PROJECT_ID }}/nodejs-server:${{ github.sha }} .
-          docker push gcr.io/${{ env.PROJECT_ID }}/nodejs-server:${{ github.sha }}
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev
 
-      - name: Deploy to Cloud Run
+      - name: Check and Create Docker Repository
         run: |
-          gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image gcr.io/${{ env.PROJECT_ID }}/nodejs-server:${{ github.sha }} \
+          REPO_PATH="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo"
+          if ! gcloud artifacts repositories list --location=${{ secrets.GCP_REGION }} | grep -q "docker-repo"; then
+            echo "Creating Docker repository..."
+            gcloud artifacts repositories create docker-repo \
+              --repository-format=docker \
+              --location=${{ secrets.GCP_REGION }} \
+              --description="Docker repository for staging deployment"
+          else
+            echo "Docker repository already exists, skipping creation"
+          fi
+
+      - name: Build and Push Image
+        run: |
+          docker build -t ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/staging-app:${{ github.sha }} .
+          docker push ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/staging-app:${{ github.sha }}
+
+      - name: Check Cloud Run Instance
+        id: check_instance
+        run: |
+          if gcloud run services describe ${{ secrets.GCP_CLOUD_RUN_STAGING_INSTANCE_NAME }} --region ${{ secrets.GCP_REGION }} --quiet >/dev/null 2>&1; then
+            echo "instance_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "instance_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Cloud Run Instance
+        id: create
+        if: steps.check_instance.outputs.instance_exists == 'false'
+        run: |
+          SERVICE_URL=$(gcloud run deploy ${{ secrets.GCP_CLOUD_RUN_STAGING_INSTANCE_NAME }} \
+            --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/staging-app:${{ github.sha }} \
             --platform managed \
-            --region ${{ env.REGION }} \
+            --region ${{ secrets.GCP_REGION }} \
             --allow-unauthenticated \
-            --set-env-vars="NODE_ENV=staging" 
+            --format="get(status.url)")
+          echo "service_url=${SERVICE_URL}" >> $GITHUB_OUTPUT
+
+      - name: Update Existing Instance
+        id: update
+        if: steps.check_instance.outputs.instance_exists == 'true'
+        run: |
+          SERVICE_URL=$(gcloud run services update ${{ secrets.GCP_CLOUD_RUN_STAGING_INSTANCE_NAME }} \
+            --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/staging-app:${{ github.sha }} \
+            --region ${{ secrets.GCP_REGION }} \
+            --format="get(status.url)")
+          echo "service_url=${SERVICE_URL}" >> $GITHUB_OUTPUT
+
+      - name: Post comment with staging URL
+        uses: mshick/add-pr-comment@v2
+        if: always()
+        with:
+          message: |
+            ## 🚀 Staging Deployment Status
+            
+            ${{ job.status == 'success' && format('### ✅ Deployment Successful
+            Access the staging environment at: {0}
+            ', steps.create.outputs.service_url || steps.update.outputs.service_url) || '### ❌ Deployment Failed
+            The staging deployment encountered an error. Please check the workflow logs for details.
+            ' }}
+          message-id: staging-deploy-${{ github.event.pull_request.number }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          allow-repeats: false
+          refresh-message-position: true

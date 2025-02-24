@@ -1,4 +1,4 @@
-name: Production Deployment
+name: Deploy to Production
 
 on:
   push:
@@ -6,35 +6,62 @@ on:
       - main
 
 env:
-  PROJECT_ID: your-project-id
-  REGION: us-central1
-  SERVICE_NAME: nodejs-server-prod
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: asia-northeast1
+  SERVICE_NAME: ${{ secrets.GCP_CLOUD_RUN_PRODUCTION_INSTANCE_NAME }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Setup Google Cloud
-        uses: google-github-actions/setup-gcloud@v0
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
-          service_account_key: ${{ secrets.GCP_SA_KEY }}
-          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
-      - name: Configure Docker
-        run: gcloud auth configure-docker
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build and Push Docker image
+      - name: Check if Cloud Run service exists
+        id: check-service
         run: |
-          docker build -t gcr.io/${{ env.PROJECT_ID }}/nodejs-server:${{ github.sha }} .
-          docker push gcr.io/${{ env.PROJECT_ID }}/nodejs-server:${{ github.sha }}
+          if gcloud run services describe ${{ env.SERVICE_NAME }} --region=${{ env.REGION }} --project=${{ env.PROJECT_ID }} > /dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Deploy to Cloud Run
+      - name: Build and Push Container
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: beta
+
+      - name: Build and Push Container
+        run: |
+          gcloud builds submit --tag gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}
+
+      - name: Create and Deploy New Service
+        if: steps.check-service.outputs.exists == 'false'
         run: |
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image gcr.io/${{ env.PROJECT_ID }}/nodejs-server:${{ github.sha }} \
-            --platform managed \
+            --image gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }} \
             --region ${{ env.REGION }} \
-            --allow-unauthenticated \
-            --set-env-vars="NODE_ENV=production" 
+            --platform managed \
+            --allow-unauthenticated
+
+      - name: Update Existing Service
+        if: steps.check-service.outputs.exists == 'true'
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --platform managed
