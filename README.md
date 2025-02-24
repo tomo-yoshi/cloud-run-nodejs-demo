@@ -1,4 +1,4 @@
-# Cloud Run Node.js Demo
+# Cloud Run Node.js Template
 
 This repository demonstrates a complete CI/CD setup for deploying a Node.js server to Google Cloud Run with preview, staging, and production environments.
 
