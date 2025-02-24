@@ -5,11 +5,6 @@ on:
     branches:
       - main
 
-env:
-  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-  REGION: asia-northeast1
-  SERVICE_NAME: ${{ secrets.GCP_CLOUD_RUN_PRODUCTION_INSTANCE_NAME }}
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -33,16 +28,16 @@ jobs:
 
       - name: Configure Docker
         run: |
-          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev
 
       - name: Check and Create Docker Repository
         run: |
-          REPO_PATH="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo"
-          if ! gcloud artifacts repositories list --location=${{ env.REGION }} | grep -q "docker-repo"; then
+          REPO_PATH="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo"
+          if ! gcloud artifacts repositories list --location=${{ secrets.GCP_REGION }} | grep -q "docker-repo"; then
             echo "Creating Docker repository..."
             gcloud artifacts repositories create docker-repo \
               --repository-format=docker \
-              --location=${{ env.REGION }} \
+              --location=${{ secrets.GCP_REGION }} \
               --description="Docker repository for production deployment"
           else
             echo "Docker repository already exists, skipping creation"
@@ -50,13 +45,13 @@ jobs:
 
       - name: Build and Push Image
         run: |
-          docker build -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/production-app:${{ github.sha }} .
-          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/production-app:${{ github.sha }}
+          docker build -t ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/production-app:${{ github.sha }} .
+          docker push ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/production-app:${{ github.sha }}
 
       - name: Check if Cloud Run service exists
         id: check-service
         run: |
-          if gcloud run services describe ${{ env.SERVICE_NAME }} --region=${{ env.REGION }} --project=${{ env.PROJECT_ID }} > /dev/null 2>&1; then
+          if gcloud run services describe ${{ secrets.GCP_CLOUD_RUN_PRODUCTION_INSTANCE_NAME }} --region=${{ secrets.GCP_REGION }} --project=${{ secrets.GCP_PROJECT_ID }} > /dev/null 2>&1; then
             echo "exists=true" >> $GITHUB_OUTPUT
           else
             echo "exists=false" >> $GITHUB_OUTPUT
@@ -65,16 +60,16 @@ jobs:
       - name: Create and Deploy New Service
         if: steps.check-service.outputs.exists == 'false'
         run: |
-          gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/production-app:${{ github.sha }} \
-            --region ${{ env.REGION }} \
+          gcloud run deploy ${{ secrets.GCP_CLOUD_RUN_PRODUCTION_INSTANCE_NAME }} \
+            --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/production-app:${{ github.sha }} \
+            --region ${{ secrets.GCP_REGION }} \
             --platform managed \
             --allow-unauthenticated
 
       - name: Update Existing Service
         if: steps.check-service.outputs.exists == 'true'
         run: |
-          gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/production-app:${{ github.sha }} \
-            --region ${{ env.REGION }} \
+          gcloud run deploy ${{ secrets.GCP_CLOUD_RUN_PRODUCTION_INSTANCE_NAME }} \
+            --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/production-app:${{ github.sha }} \
+            --region ${{ secrets.GCP_REGION }} \
             --platform managed
