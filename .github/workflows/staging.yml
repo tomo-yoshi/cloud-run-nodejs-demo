@@ -4,13 +4,16 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     branches:
+      - main
       - develop
 
 jobs:
   deploy-staging:
     if: |
-      github.event.pull_request.base.ref == 'develop' &&
-      github.event.pull_request.head.ref != 'develop'
+      (github.event.pull_request.base.ref == 'develop' &&
+      github.event.pull_request.head.ref != 'develop') ||
+      (github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'develop')
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
@@ -65,7 +68,7 @@ jobs:
         id: create
         if: steps.check_instance.outputs.instance_exists == 'false'
         run: |
-          SERVICE_URL=$(gcloud run deploy ${{ secrets.GCP_CLOUD_RUN_STAGING_INSTANCE_NAME }} \
+          SERVICE_URL=$(gcloud run deploy "${{ secrets.GCP_CLOUD_RUN_STAGING_INSTANCE_NAME }}" \
             --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/docker-repo/staging-app:${{ github.sha }} \
             --platform managed \
             --region ${{ secrets.GCP_REGION }} \

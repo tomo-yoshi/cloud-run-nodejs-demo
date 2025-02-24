@@ -88,7 +88,10 @@ jobs:
           refresh-message-position: true
 
   cleanup-preview:
-    if: ${{ github.event.action == 'closed' && github.event.pull_request.number == github.event.number }}
+    if: |
+      github.event.action == 'closed' &&
+      github.event.pull_request.number == github.event.number &&
+      !(github.event.pull_request.head.ref == 'develop' && github.event.pull_request.base.ref == 'main')
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
